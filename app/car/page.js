@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import BottomNav from "../../components/BottomNav";
 
 const STORAGE_KEY = "car_trips";
 const ACTIVE_KEY = "car_active_trip";
@@ -316,6 +317,7 @@ export default function CarLog() {
           </div>
         )}
       </div>
+      <BottomNav />
     </div>
   );
 }

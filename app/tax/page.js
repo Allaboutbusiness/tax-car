@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback } from "react";
 import { loadRules, saveRules, addRule, applyRules, CATEGORIES } from "../../lib/rules";
+import BottomNav from "../../components/BottomNav";
 
 const DATA_KEY = (year) => `tax_data_${year}`;
 const CONFIG_KEY = "tax_config";
@@ -157,6 +158,59 @@ async function exportExcel(txs, carRatio, year) {
   URL.revokeObjectURL(url);
 }
 
+// ── 홈택스 지급명세서 파싱 ──────────────────────────────
+async function parseHometax(file) {
+  const { read, utils } = await import("xlsx");
+  const buf = await file.arrayBuffer();
+  const wb = read(buf, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
+
+  const results = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i].map(c => String(c || "").trim());
+    // 금액이 있는 행 탐색: 지급자명 + 숫자 컬럼 2개 이상
+    const nums = row.filter(c => /^[\d,]+$/.test(c.replace(/,/g, "")) && c.length > 3);
+    if (nums.length < 2) continue;
+    const name = row.find(c => c.length > 1 && !/^[\d,.\-]+$/.test(c) && c !== "");
+    if (!name) continue;
+    // 가장 큰 숫자 = 세전 지급액
+    const amounts = row
+      .map(c => parseInt(c.replace(/,/g, "")) || 0)
+      .filter(n => n > 10000);
+    if (!amounts.length) continue;
+    const gross = Math.max(...amounts);
+    const tax = amounts.find(n => n !== gross && n < gross) || Math.round(gross * WITHHOLDING);
+    const net = gross - tax;
+    results.push({ payer: name, gross, tax, net });
+  }
+  return results;
+}
+
+// ── 크로스체크 로직 ──────────────────────────────────────
+function crossCheck(hometaxItems, txs) {
+  const bankIncomeTotal = txs
+    .filter(t => t.type === "income")
+    .reduce((s, t) => s + (t.in || 0), 0);
+  const hometaxGrossTotal = hometaxItems.reduce((s, i) => s + i.gross, 0);
+  const hometaxNetTotal = hometaxItems.reduce((s, i) => s + i.net, 0);
+  const bankGrossCalc = Math.round(bankIncomeTotal / (1 - WITHHOLDING));
+  const diff = bankGrossCalc - hometaxGrossTotal;
+  const diffPct = hometaxGrossTotal > 0
+    ? Math.abs(diff / hometaxGrossTotal * 100).toFixed(1)
+    : 0;
+  return {
+    bankNet: bankIncomeTotal,
+    bankGross: bankGrossCalc,
+    hometaxGross: hometaxGrossTotal,
+    hometaxNet: hometaxNetTotal,
+    diff,
+    diffPct,
+    ok: Math.abs(diff) < 10000,
+    items: hometaxItems,
+  };
+}
+
 // ── 컴포넌트 ────────────────────────────────────────────
 export default function TaxPage() {
   const thisYear = new Date().getFullYear().toString();
@@ -173,6 +227,10 @@ export default function TaxPage() {
   const [bankName, setBankName] = useState("");
   const [cardName, setCardName] = useState("");
   const [rules, setRulesState] = useState(() => { try { return loadRules(); } catch { return []; } });
+  const hometaxRef = useRef();
+  const [hometaxName, setHometaxName] = useState("");
+  const [hometaxResult, setHometaxResult] = useState(null);
+  const [hometaxLoading, setHometaxLoading] = useState(false);
 
   const loadTxs = useCallback((y) => {
     const data = loadData(y || year);
@@ -182,8 +240,23 @@ export default function TaxPage() {
 
   const handleTab = (t) => {
     setTab(t);
-    if (t === "review" || t === "export") loadTxs(year);
+    if (t === "review" || t === "export" || t === "hometax") loadTxs(year);
   };
+
+  async function analyzeHometax() {
+    const file = hometaxRef.current?.files[0];
+    if (!file) { return; }
+    setHometaxLoading(true);
+    try {
+      const items = await parseHometax(file);
+      const current = loadData(year);
+      setHometaxResult(crossCheck(items, current));
+    } catch (e) {
+      alert("파싱 오류: " + e.message);
+    } finally {
+      setHometaxLoading(false);
+    }
+  }
 
   async function analyze() {
     const bankFile = bankRef.current?.files[0];
@@ -299,7 +372,7 @@ export default function TaxPage() {
       </div>
 
       <div style={ss.tabs}>
-        {[["upload","① 업로드"],["review","② 분류검토"],["export","③ 내보내기"]].map(([t,l]) => (
+        {[["upload","① 업로드"],["review","② 분류검토"],["export","③ 내보내기"],["hometax","④ 홈택스검증"]].map(([t,l]) => (
           <button key={t} style={ss.tab(tab===t)} onClick={() => handleTab(t)}>{l}</button>
         ))}
       </div>
@@ -431,6 +504,88 @@ export default function TaxPage() {
           </button>
         </div>
       )}
+
+      {/* ④ 홈택스 검증 */}
+      {tab === "hometax" && (
+        <div style={ss.panel}>
+          <div style={ss.card}>
+            <h3 style={{ color: "#1565c0", marginBottom: 6, fontSize: 15 }}>🏛 홈택스 지급명세서 업로드</h3>
+            <p style={{ fontSize: 13, color: "#666", marginBottom: 14, lineHeight: 1.6 }}>
+              홈택스 → 조회/발급 → 지급명세서 → 근로·사업 등 소득 지급명세서<br />
+              <strong>사업소득 지급명세서</strong>를 Excel로 다운로드 후 업로드하세요.
+            </p>
+            <div style={ss.dropZone} onClick={() => hometaxRef.current?.click()}>
+              <input ref={hometaxRef} type="file" accept=".xls,.xlsx" style={{ display: "none" }}
+                onChange={e => { setHometaxName(e.target.files[0]?.name || ""); setHometaxResult(null); }} />
+              <div style={{ fontSize: 28 }}>🏛</div>
+              <div style={{ fontSize: 13, color: "#555", marginTop: 6 }}>홈택스 지급명세서 Excel</div>
+              <div style={{ fontSize: 12, color: "#1565c0", fontWeight: 700, marginTop: 4 }}>{hometaxName || "파일 없음"}</div>
+            </div>
+            <button style={{ ...ss.btn(hometaxLoading ? "#aaa" : "#1565c0"), marginTop: 12, width: "100%" }}
+              disabled={hometaxLoading} onClick={analyzeHometax}>
+              {hometaxLoading ? "⏳ 분석 중..." : "🔍 크로스체크 시작"}
+            </button>
+          </div>
+
+          {hometaxResult && (
+            <>
+              {/* 총합 비교 */}
+              <div style={{ ...ss.card, border: `2px solid ${hometaxResult.ok ? "#2e7d32" : "#e65100"}` }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: hometaxResult.ok ? "#2e7d32" : "#e65100", marginBottom: 12 }}>
+                  {hometaxResult.ok ? "✅ 수입 일치" : "⚠ 수입 차이 발생"}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 13 }}>
+                  {[
+                    ["통장 입금 합계(세후)", fmt(hometaxResult.bankNet) + "원"],
+                    ["통장 역산 세전 금액", fmt(hometaxResult.bankGross) + "원"],
+                    ["홈택스 신고 세전 합계", fmt(hometaxResult.hometaxGross) + "원"],
+                    ["홈택스 차인지급액(세후)", fmt(hometaxResult.hometaxNet) + "원"],
+                  ].map(([label, val]) => (
+                    <div key={label} style={{ background: "#f5f7ff", borderRadius: 8, padding: "10px 12px" }}>
+                      <div style={{ color: "#888", fontSize: 11 }}>{label}</div>
+                      <div style={{ fontWeight: 700, color: "#1565c0", marginTop: 2 }}>{val}</div>
+                    </div>
+                  ))}
+                </div>
+                {!hometaxResult.ok && (
+                  <div style={{ marginTop: 12, padding: "10px 12px", background: "#fff3e0", borderRadius: 8, fontSize: 13 }}>
+                    차이: <strong style={{ color: "#e65100" }}>{fmt(Math.abs(hometaxResult.diff))}원 ({hometaxResult.diffPct}%)</strong>
+                    <br /><span style={{ fontSize: 12, color: "#888" }}>
+                      {hometaxResult.diff > 0 ? "→ 통장에 홈택스보다 많은 수입이 있습니다. 신고 누락 확인 필요." : "→ 통장에 홈택스보다 적은 수입이 있습니다. 입금 누락 확인 필요."}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* 지급자별 내역 */}
+              <div style={ss.card}>
+                <h4 style={{ fontSize: 14, color: "#555", marginBottom: 10 }}>지급자별 내역</h4>
+                {hometaxResult.items.map((item, i) => {
+                  const matched = txs.some(t =>
+                    t.type === "income" && (t.memo || "").toLowerCase().includes(item.payer.slice(0, 3).toLowerCase())
+                  );
+                  return (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #eee", fontSize: 13, alignItems: "center" }}>
+                      <div>
+                        <span style={{ display: "inline-block", padding: "1px 7px", borderRadius: 10, fontSize: 11, fontWeight: 700, background: matched ? "#e8f5e9" : "#fff3e0", color: matched ? "#2e7d32" : "#e65100", marginRight: 8 }}>
+                          {matched ? "✅ 매칭" : "⚠ 미확인"}
+                        </span>
+                        {item.payer}
+                      </div>
+                      <div style={{ textAlign: "right", color: "#555" }}>
+                        세전 {fmt(item.gross)}원<br />
+                        <span style={{ fontSize: 11, color: "#888" }}>세후 {fmt(item.net)}원</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      <BottomNav />
     </div>
   );
 }
