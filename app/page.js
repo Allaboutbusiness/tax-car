@@ -12,7 +12,7 @@ export default function Home() {
         <div style={{ fontSize: 44, marginBottom: 8 }}>🧾</div>
         <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>세무 자동 정리</h1>
         <p style={{ fontSize: 13, opacity: 0.8, marginTop: 6, margin: "6px 0 0" }}>
-          보험설계사 세무 관리 도구
+          김진기 CFO를 위한
         </p>
       </div>
 

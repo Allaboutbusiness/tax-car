@@ -366,7 +366,7 @@ export default function TaxPage() {
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           <select value={year} onChange={e => { setYear(e.target.value); loadTxs(e.target.value); }}
             style={{ padding: "4px 8px", borderRadius: 6, border: "none", fontSize: 13 }}>
-            {["2025", "2026", "2024"].map(y => <option key={y} value={y}>{y}년</option>)}
+            {Array.from({ length: 57 }, (_, i) => 2020 + i).map(y => <option key={y} value={String(y)}>{y}년</option>)}
           </select>
         </div>
       </div>
