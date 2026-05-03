@@ -169,12 +169,10 @@ async function parseHometax(file) {
   const results = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i].map(c => String(c || "").trim());
-    // 금액이 있는 행 탐색: 지급자명 + 숫자 컬럼 2개 이상
     const nums = row.filter(c => /^[\d,]+$/.test(c.replace(/,/g, "")) && c.length > 3);
     if (nums.length < 2) continue;
     const name = row.find(c => c.length > 1 && !/^[\d,.\-]+$/.test(c) && c !== "");
     if (!name) continue;
-    // 가장 큰 숫자 = 세전 지급액
     const amounts = row
       .map(c => parseInt(c.replace(/,/g, "")) || 0)
       .filter(n => n > 10000);
@@ -218,6 +216,8 @@ export default function TaxPage() {
   const [txs, setTxs] = useState([]);
   const [carRatio, setCarRatio] = useState(() => loadConfig().car_business_ratio || 80);
   const [filter, setFilter] = useState("all");
+  const [colFilters, setColFilters] = useState({ date: "", name: "", source: "", category: "", method: "", type: "" });
+  const [showColFilter, setShowColFilter] = useState(false);
   const [tab, setTab] = useState("upload");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
@@ -231,6 +231,10 @@ export default function TaxPage() {
   const [hometaxName, setHometaxName] = useState("");
   const [hometaxResult, setHometaxResult] = useState(null);
   const [hometaxLoading, setHometaxLoading] = useState(false);
+  const mergeRef = useRef();
+  const [mergeFileNames, setMergeFileNames] = useState([]);
+  const [mergeStatus, setMergeStatus] = useState("");
+  const [mergeLoading, setMergeLoading] = useState(false);
 
   const loadTxs = useCallback((y) => {
     const data = loadData(y || year);
@@ -255,6 +259,103 @@ export default function TaxPage() {
       alert("파싱 오류: " + e.message);
     } finally {
       setHometaxLoading(false);
+    }
+  }
+
+  async function mergeExcels() {
+    const files = Array.from(mergeRef.current?.files || []);
+    if (!files.length) { setMergeStatus("파일을 선택해주세요."); return; }
+    setMergeLoading(true);
+    setMergeStatus("파일 읽는 중...");
+    try {
+      const { read, utils, write } = await import("xlsx");
+      let allIncome = [], allExpense = [];
+
+      for (const file of files) {
+        const buf = await file.arrayBuffer();
+        const wb = read(buf, { type: "array" });
+
+        const salesSheet = wb.Sheets["매출장"];
+        if (salesSheet) {
+          const rows = utils.sheet_to_json(salesSheet, { header: 1, raw: false, defval: "" });
+          for (let i = 1; i < rows.length - 1; i++) {
+            const r = rows[i];
+            const date = String(r[0] || "").trim();
+            const name = String(r[1] || "").trim();
+            const net = parseInt(String(r[2] || "0").replace(/,/g, "")) || 0;
+            if (!date || !name || net === 0) continue;
+            allIncome.push({ date, name, net });
+          }
+        }
+
+        const expSheet = wb.Sheets["매입장(필요경비)"];
+        if (expSheet) {
+          const rows = utils.sheet_to_json(expSheet, { header: 1, raw: false, defval: "" });
+          for (let i = 1; i < rows.length - 1; i++) {
+            const r = rows[i];
+            const date = String(r[0] || "").trim();
+            const name = String(r[1] || "").trim();
+            const cat = String(r[2] || "").trim();
+            const amt = parseInt(String(r[3] || "0").replace(/,/g, "")) || 0;
+            const ratioStr = String(r[4] || "100%");
+            const ratio = parseInt(ratioStr) || 100;
+            const src = String(r[6] || "").trim();
+            if (!date || !name || amt === 0) continue;
+            allExpense.push({ date, name, cat, amt, ratio, src });
+          }
+        }
+      }
+
+      // 중복 제거
+      const incomeKeys = new Set();
+      const dedupedIncome = allIncome.filter(r => {
+        const k = `${r.date}|${r.name}|${r.net}`;
+        if (incomeKeys.has(k)) return false;
+        incomeKeys.add(k); return true;
+      });
+      const expKeys = new Set();
+      const dedupedExp = allExpense.filter(r => {
+        const k = `${r.date}|${r.name}|${r.amt}`;
+        if (expKeys.has(k)) return false;
+        expKeys.add(k); return true;
+      });
+
+      // 엑셀 생성
+      const wb2 = utils.book_new();
+
+      const salesRows = [["날짜", "거래처", "입금액(세후)", "총수입금액(세전)", "원천징수세액"]];
+      let totalNet = 0;
+      [...dedupedIncome].sort((a, b) => a.date.localeCompare(b.date)).forEach(r => {
+        const gross = Math.round(r.net / (1 - WITHHOLDING));
+        totalNet += r.net;
+        salesRows.push([r.date, r.name, r.net, gross, gross - r.net]);
+      });
+      const totalGross = Math.round(totalNet / (1 - WITHHOLDING));
+      salesRows.push(["합계", "", totalNet, totalGross, totalGross - totalNet]);
+      utils.book_append_sheet(wb2, utils.aoa_to_sheet(salesRows), "매출장");
+
+      const expRows = [["날짜", "거래처", "카테고리", "원금액", "업무비율", "인정금액", "출처"]];
+      let totalApproved = 0;
+      [...dedupedExp].sort((a, b) => a.date.localeCompare(b.date)).forEach(r => {
+        const approved = Math.round(r.amt * r.ratio / 100);
+        totalApproved += approved;
+        expRows.push([r.date, r.name, r.cat, r.amt, `${r.ratio}%`, approved, r.src]);
+      });
+      expRows.push(["합계", "", "", "", "", totalApproved, ""]);
+      utils.book_append_sheet(wb2, utils.aoa_to_sheet(expRows), "매입장(필요경비)");
+
+      const buf2 = write(wb2, { type: "array", bookType: "xlsx" });
+      const blob = new Blob([buf2], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.download = `세무정리_합치기_${year}.xlsx`;
+      a.href = url; a.click();
+      URL.revokeObjectURL(url);
+      setMergeStatus(`✅ 완료! 매출 ${dedupedIncome.length}건, 매입 ${dedupedExp.length}건 합쳐서 다운로드`);
+    } catch (e) {
+      setMergeStatus("❌ 오류: " + e.message);
+    } finally {
+      setMergeLoading(false);
     }
   }
 
@@ -299,7 +400,6 @@ export default function TaxPage() {
         ...unmatched.map(tx => ({ ...tx, ...(aiMap[tx.id] || { category: "미분류", type: "unclassified", method: "unclassified" }) })),
       ];
 
-      // 기존 데이터와 병합 (중복 제거)
       const existing = loadData(year);
       const existingKeys = new Set(existing.map(t => `${t.date}|${t.memo || t.merchant}|${t.amount || t.in || t.out}`));
       const deduped = allCategorized.filter(t => !existingKeys.has(`${t.date}|${t.memo || t.merchant}|${t.amount || t.in || t.out}`));
@@ -336,6 +436,23 @@ export default function TaxPage() {
     return t.method === filter;
   });
 
+  const displayedTxs = filtered.filter(t => {
+    const name = t.merchant || t.memo || "";
+    if (colFilters.date && !t.date?.startsWith(colFilters.date)) return false;
+    if (colFilters.name && !name.toLowerCase().includes(colFilters.name.toLowerCase())) return false;
+    if (colFilters.source) {
+      const srcLabel = t.source === "card" ? "카드" : "통장";
+      if (srcLabel !== colFilters.source) return false;
+    }
+    if (colFilters.category && t.category !== colFilters.category) return false;
+    if (colFilters.method && t.method !== colFilters.method) return false;
+    if (colFilters.type) {
+      const typeLabel = t.type === "income" ? "매출" : t.type === "exclude" ? "제외" : "매입";
+      if (typeLabel !== colFilters.type) return false;
+    }
+    return true;
+  });
+
   const entertainmentTotal = txs.filter(t => t.category === "접대비").reduce((s, t) => s + (t.amount || Math.max(t.out || 0, t.in || 0)), 0);
   const incomeTotal = txs.filter(t => t.type === "income").reduce((s, t) => s + (t.in || 0), 0);
   const expenseTotal = txs.filter(t => t.type === "expense").reduce((s, t) => {
@@ -343,6 +460,12 @@ export default function TaxPage() {
     return s + Math.round(amt * (t.category === "차량유지비" ? carRatio : 100) / 100);
   }, 0);
   const grossIncome = Math.round(incomeTotal / (1 - WITHHOLDING));
+
+  // 컬럼 필터용 유니크 값
+  const uniqueMonths = [...new Set(txs.map(t => t.date?.slice(0, 7)).filter(Boolean))].sort();
+  const uniqueCategories = [...new Set(txs.map(t => t.category).filter(Boolean))].sort();
+
+  const hasColFilter = Object.values(colFilters).some(v => v !== "");
 
   const ss = {
     wrap: { minHeight: "100vh", background: "#f0f4ff" },
@@ -354,7 +477,7 @@ export default function TaxPage() {
     card: { background: "#fff", borderRadius: 12, padding: 18, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,.07)" },
     btn: (bg) => ({ background: bg, color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer" }),
     input: { padding: "8px 12px", border: "1.5px solid #c5cae9", borderRadius: 8, fontSize: 14, width: "100%", boxSizing: "border-box" },
-    dropZone: { border: "2px dashed #90caf9", borderRadius: 10, padding: "20px", textAlign: "center", cursor: "pointer", background: "#f5f9ff" },
+    filterInput: { padding: "4px 6px", border: "1.5px solid #90caf9", borderRadius: 6, fontSize: 11, width: "100%", boxSizing: "border-box", background: "#f0f8ff" },
   };
 
   return (
@@ -364,15 +487,20 @@ export default function TaxPage() {
         <span style={{ fontSize: 20 }}>📊</span>
         <strong style={{ fontSize: 16 }}>세무 정리</strong>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <select value={year} onChange={e => { setYear(e.target.value); loadTxs(e.target.value); }}
-            style={{ padding: "4px 8px", borderRadius: 6, border: "none", fontSize: 13 }}>
-            {Array.from({ length: 57 }, (_, i) => 2020 + i).map(y => <option key={y} value={String(y)}>{y}년</option>)}
-          </select>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+            <select value={year} onChange={e => { setYear(e.target.value); loadTxs(e.target.value); }}
+              style={{ padding: "4px 8px", borderRadius: 6, border: "none", fontSize: 13 }}>
+              {Array.from({ length: 57 }, (_, i) => 2020 + i).map(y => <option key={y} value={String(y)}>{y}년</option>)}
+            </select>
+            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", marginTop: 2 }}>
+              {txs.length > 0 ? `${txs.length}건 저장됨` : "데이터 없음"}
+            </span>
+          </div>
         </div>
       </div>
 
       <div style={ss.tabs}>
-        {[["upload","① 업로드"],["review","② 분류검토"],["export","③ 내보내기"],["hometax","④ 홈택스검증"]].map(([t,l]) => (
+        {[["upload","① 업로드"],["review","② 분류검토"],["export","③ 내보내기"],["hometax","④ 홈택스검증"],["merge","⑤ 합치기"]].map(([t,l]) => (
           <button key={t} style={ss.tab(tab===t)} onClick={() => handleTab(t)}>{l}</button>
         ))}
       </div>
@@ -380,6 +508,10 @@ export default function TaxPage() {
       {/* ① 업로드 */}
       {tab === "upload" && (
         <div style={ss.panel}>
+          <div style={{ background: "#e3f2fd", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#1565c0", lineHeight: 1.7 }}>
+            💡 <strong>{year}년 데이터 업로드</strong> — 업로드한 파일은 <strong>{year}년 데이터</strong>로 누적 저장됩니다.<br />
+            분기별·월별로 나눠서 올려도 자동으로 합쳐집니다. 중복은 자동 제거됩니다.
+          </div>
           <div style={ss.card}>
             <h3 style={{ color: "#1565c0", marginBottom: 14, fontSize: 15 }}>📁 파일 업로드</h3>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
@@ -426,27 +558,88 @@ export default function TaxPage() {
             </div>
           )}
 
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
             {[["all","전체"],["rule","✅ 규칙"],["ai","🤖 AI"],["manual","✏️ 수동"],["unclassified","❓ 미분류"]].map(([f,l]) => (
               <button key={f} onClick={() => setFilter(f)} style={{
                 padding: "5px 12px", borderRadius: 16, border: "1.5px solid #c5cae9", fontSize: 12, fontWeight: 600,
                 cursor: "pointer", background: filter === f ? "#1565c0" : "#fff", color: filter === f ? "#fff" : "#555",
               }}>{l}</button>
             ))}
-            <span style={{ marginLeft: "auto", fontSize: 12, color: "#888", alignSelf: "center" }}>{filtered.length}건</span>
+            <button onClick={() => { setShowColFilter(v => !v); if (showColFilter) setColFilters({ date: "", name: "", source: "", category: "", method: "", type: "" }); }}
+              style={{ padding: "5px 12px", borderRadius: 16, border: `1.5px solid ${hasColFilter ? "#1565c0" : "#c5cae9"}`, fontSize: 12, fontWeight: 600, cursor: "pointer", background: hasColFilter ? "#e3f2fd" : "#fff", color: hasColFilter ? "#1565c0" : "#555", marginLeft: 4 }}>
+              🔽 컬럼필터{hasColFilter ? " ●" : ""}
+            </button>
+            <span style={{ marginLeft: "auto", fontSize: 12, color: "#888", alignSelf: "center" }}>{displayedTxs.length}건</span>
           </div>
 
           <div style={{ ...ss.card, padding: 0, overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
                 <tr style={{ background: "#1565c0" }}>
-                  {["날짜","거래처/메모","금액","출처","카테고리","분류","저장"].map(h => (
+                  {["날짜","거래처/메모","금액","출처","구분","카테고리","분류","저장"].map(h => (
                     <th key={h} style={{ color: "#fff", padding: "9px 10px", textAlign: "left", fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
                   ))}
                 </tr>
+                {showColFilter && (
+                  <tr style={{ background: "#e8f0fe" }}>
+                    <td style={{ padding: "4px 6px" }}>
+                      <select value={colFilters.date} onChange={e => setColFilters(f => ({ ...f, date: e.target.value }))}
+                        style={ss.filterInput}>
+                        <option value="">전체</option>
+                        {uniqueMonths.map(m => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </td>
+                    <td style={{ padding: "4px 6px" }}>
+                      <input placeholder="검색" value={colFilters.name}
+                        onChange={e => setColFilters(f => ({ ...f, name: e.target.value }))}
+                        style={ss.filterInput} />
+                    </td>
+                    <td style={{ padding: "4px 6px" }} />
+                    <td style={{ padding: "4px 6px" }}>
+                      <select value={colFilters.source} onChange={e => setColFilters(f => ({ ...f, source: e.target.value }))}
+                        style={ss.filterInput}>
+                        <option value="">전체</option>
+                        <option value="카드">카드</option>
+                        <option value="통장">통장</option>
+                      </select>
+                    </td>
+                    <td style={{ padding: "4px 6px" }}>
+                      <select value={colFilters.type} onChange={e => setColFilters(f => ({ ...f, type: e.target.value }))}
+                        style={ss.filterInput}>
+                        <option value="">전체</option>
+                        <option value="매출">매출</option>
+                        <option value="매입">매입</option>
+                        <option value="제외">제외</option>
+                      </select>
+                    </td>
+                    <td style={{ padding: "4px 6px" }}>
+                      <select value={colFilters.category} onChange={e => setColFilters(f => ({ ...f, category: e.target.value }))}
+                        style={ss.filterInput}>
+                        <option value="">전체</option>
+                        {uniqueCategories.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </td>
+                    <td style={{ padding: "4px 6px" }}>
+                      <select value={colFilters.method} onChange={e => setColFilters(f => ({ ...f, method: e.target.value }))}
+                        style={ss.filterInput}>
+                        <option value="">전체</option>
+                        <option value="rule">규칙</option>
+                        <option value="ai">AI</option>
+                        <option value="manual">수동</option>
+                        <option value="unclassified">미분류</option>
+                      </select>
+                    </td>
+                    <td style={{ padding: "4px 6px" }}>
+                      <button onClick={() => setColFilters({ date: "", name: "", source: "", category: "", method: "", type: "" })}
+                        style={{ padding: "3px 6px", fontSize: 10, background: "#c62828", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
+                        초기화
+                      </button>
+                    </td>
+                  </tr>
+                )}
               </thead>
               <tbody>
-                {filtered.map((tx, i) => {
+                {displayedTxs.map((tx, i) => {
                   const amt = tx.amount || Math.max(tx.out || 0, tx.in || 0);
                   const name = tx.merchant || tx.memo || "";
                   const isUncl = tx.category === "미분류";
@@ -514,7 +707,6 @@ export default function TaxPage() {
 
           {hometaxResult && (
             <>
-              {/* 총합 비교 */}
               <div style={{ ...ss.card, border: `2px solid ${hometaxResult.ok ? "#2e7d32" : "#e65100"}` }}>
                 <div style={{ fontSize: 15, fontWeight: 700, color: hometaxResult.ok ? "#2e7d32" : "#e65100", marginBottom: 12 }}>
                   {hometaxResult.ok ? "✅ 수입 일치" : "⚠ 수입 차이 발생"}
@@ -542,7 +734,6 @@ export default function TaxPage() {
                 )}
               </div>
 
-              {/* 지급자별 내역 */}
               <div style={ss.card}>
                 <h4 style={{ fontSize: 14, color: "#555", marginBottom: 10 }}>지급자별 내역</h4>
                 {hometaxResult.items.map((item, i) => {
@@ -567,6 +758,56 @@ export default function TaxPage() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {/* ⑤ 합치기 */}
+      {tab === "merge" && (
+        <div style={ss.panel}>
+          <div style={{ background: "#e8f5e9", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#2e7d32", lineHeight: 1.7 }}>
+            💡 <strong>엑셀 합치기</strong> — 분기별·월별로 만든 세무정리 엑셀 파일들을 선택하면<br />
+            중복 없이 하나의 파일로 합쳐서 다운로드합니다.
+          </div>
+          <div style={ss.card}>
+            <h3 style={{ color: "#2e7d32", marginBottom: 14, fontSize: 15 }}>📂 엑셀 파일 선택 (여러 개 가능)</h3>
+            <div
+              onClick={() => mergeRef.current?.click()}
+              style={{ border: "2px dashed #81c784", borderRadius: 10, padding: "28px", textAlign: "center", cursor: "pointer", background: "#f1f8e9" }}
+            >
+              <input ref={mergeRef} type="file" accept=".xlsx" multiple style={{ display: "none" }}
+                onChange={e => {
+                  const names = Array.from(e.target.files || []).map(f => f.name);
+                  setMergeFileNames(names);
+                  setMergeStatus("");
+                }} />
+              <div style={{ fontSize: 32 }}>📎</div>
+              <div style={{ fontSize: 13, color: "#555", marginTop: 8 }}>클릭하여 세무정리 엑셀 파일 선택</div>
+              <div style={{ fontSize: 12, color: "#888", marginTop: 4 }}>세무정리_2025.xlsx, 세무정리_2025_Q2.xlsx 등</div>
+            </div>
+
+            {mergeFileNames.length > 0 && (
+              <div style={{ marginTop: 12, padding: "10px 14px", background: "#f5f5f5", borderRadius: 8 }}>
+                <div style={{ fontSize: 12, color: "#555", fontWeight: 700, marginBottom: 6 }}>선택된 파일 ({mergeFileNames.length}개)</div>
+                {mergeFileNames.map((n, i) => (
+                  <div key={i} style={{ fontSize: 12, color: "#333", padding: "2px 0" }}>📄 {n}</div>
+                ))}
+              </div>
+            )}
+
+            <button
+              style={{ ...ss.btn(mergeLoading ? "#aaa" : "#2e7d32"), marginTop: 14, width: "100%" }}
+              disabled={mergeLoading}
+              onClick={mergeExcels}
+            >
+              {mergeLoading ? "⏳ 합치는 중..." : "🔗 합쳐서 다운로드"}
+            </button>
+
+            {mergeStatus && (
+              <div style={{ marginTop: 10, fontSize: 13, color: mergeStatus.startsWith("✅") ? "#2e7d32" : "#c62828", fontWeight: 600 }}>
+                {mergeStatus}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -614,12 +855,21 @@ function TxRow({ tx, amt, name, isUncl, onSave }) {
   const rowBg = isUncl ? "#fff8e1" : "transparent";
   const borderColor = { rule: "#2e7d32", ai: "#e65100", manual: "#6a1b9a", unclassified: "#c62828", ai_low: "#c62828" }[tx.method] || "#ccc";
 
+  const typeLabel = tx.type === "income" ? "매출(입금)" : tx.type === "exclude" ? "제외" : "매입(출금)";
+  const typeBg = tx.type === "income" ? "#e8f5e9" : tx.type === "exclude" ? "#f5f5f5" : "#ffebee";
+  const typeColor = tx.type === "income" ? "#2e7d32" : tx.type === "exclude" ? "#888" : "#c62828";
+
   return (
     <tr style={{ background: rowBg, borderLeft: `3px solid ${borderColor}` }}>
       <td style={{ padding: "6px 10px", borderBottom: "1px solid #e8eaf6", whiteSpace: "nowrap" }}>{tx.date}</td>
       <td style={{ padding: "6px 10px", borderBottom: "1px solid #e8eaf6", maxWidth: 180 }} title={name}>{name.length > 20 ? name.slice(0, 20) + "…" : name}</td>
       <td style={{ padding: "6px 10px", borderBottom: "1px solid #e8eaf6", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(amt)}</td>
       <td style={{ padding: "6px 10px", borderBottom: "1px solid #e8eaf6" }}>{tx.source === "card" ? "카드" : "통장"}</td>
+      <td style={{ padding: "6px 10px", borderBottom: "1px solid #e8eaf6" }}>
+        <span style={{ display: "inline-block", padding: "2px 7px", borderRadius: 10, fontSize: 11, fontWeight: 700, background: typeBg, color: typeColor, whiteSpace: "nowrap" }}>
+          {typeLabel}
+        </span>
+      </td>
       <td style={{ padding: "6px 10px", borderBottom: "1px solid #e8eaf6" }}>
         <select value={cat} onChange={e => setCat(e.target.value)}
           style={{ padding: "3px 6px", border: "1px solid #c5cae9", borderRadius: 6, fontSize: 12 }}>
