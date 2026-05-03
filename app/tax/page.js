@@ -383,20 +383,10 @@ export default function TaxPage() {
           <div style={ss.card}>
             <h3 style={{ color: "#1565c0", marginBottom: 14, fontSize: 15 }}>📁 파일 업로드</h3>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-              <div style={ss.dropZone} onClick={() => bankRef.current?.click()}>
-                <input ref={bankRef} type="file" accept=".xls,.xlsx" style={{ display: "none" }}
-                  onChange={e => setBankName(e.target.files[0]?.name || "")} />
-                <div style={{ fontSize: 28 }}>🏦</div>
-                <div style={{ fontSize: 13, color: "#555", marginTop: 6 }}>국민은행 XLS</div>
-                <div style={{ fontSize: 12, color: "#1565c0", fontWeight: 700, marginTop: 4 }}>{bankName || "파일 없음"}</div>
-              </div>
-              <div style={ss.dropZone} onClick={() => cardRef.current?.click()}>
-                <input ref={cardRef} type="file" accept=".xls,.xlsx" style={{ display: "none" }}
-                  onChange={e => setCardName(e.target.files[0]?.name || "")} />
-                <div style={{ fontSize: 28 }}>💳</div>
-                <div style={{ fontSize: 13, color: "#555", marginTop: 6 }}>신한카드 XLS</div>
-                <div style={{ fontSize: 12, color: "#1565c0", fontWeight: 700, marginTop: 4 }}>{cardName || "파일 없음"}</div>
-              </div>
+              <DropZone icon="🏦" label="국민은행 XLS" name={bankName} inputRef={bankRef}
+                onChange={e => setBankName(e.target.files[0]?.name || "")} />
+              <DropZone icon="💳" label="신한카드 XLS" name={cardName} inputRef={cardRef}
+                onChange={e => setCardName(e.target.files[0]?.name || "")} />
             </div>
           </div>
 
@@ -514,13 +504,8 @@ export default function TaxPage() {
               홈택스 → 조회/발급 → 지급명세서 → 근로·사업 등 소득 지급명세서<br />
               <strong>사업소득 지급명세서</strong>를 Excel로 다운로드 후 업로드하세요.
             </p>
-            <div style={ss.dropZone} onClick={() => hometaxRef.current?.click()}>
-              <input ref={hometaxRef} type="file" accept=".xls,.xlsx" style={{ display: "none" }}
-                onChange={e => { setHometaxName(e.target.files[0]?.name || ""); setHometaxResult(null); }} />
-              <div style={{ fontSize: 28 }}>🏛</div>
-              <div style={{ fontSize: 13, color: "#555", marginTop: 6 }}>홈택스 지급명세서 Excel</div>
-              <div style={{ fontSize: 12, color: "#1565c0", fontWeight: 700, marginTop: 4 }}>{hometaxName || "파일 없음"}</div>
-            </div>
+            <DropZone icon="🏛" label="홈택스 지급명세서 Excel" name={hometaxName} inputRef={hometaxRef}
+              onChange={e => { setHometaxName(e.target.files[0]?.name || ""); setHometaxResult(null); }} />
             <button style={{ ...ss.btn(hometaxLoading ? "#aaa" : "#1565c0"), marginTop: 12, width: "100%" }}
               disabled={hometaxLoading} onClick={analyzeHometax}>
               {hometaxLoading ? "⏳ 분석 중..." : "🔍 크로스체크 시작"}
@@ -586,6 +571,40 @@ export default function TaxPage() {
       )}
 
       <BottomNav />
+    </div>
+  );
+}
+
+function DropZone({ icon, label, name, inputRef, onChange }) {
+  const [over, setOver] = useState(false);
+
+  function handleDrop(e) {
+    e.preventDefault();
+    setOver(false);
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    inputRef.current.files = dt.files;
+    onChange({ target: { files: dt.files } });
+  }
+
+  return (
+    <div
+      onClick={() => inputRef.current?.click()}
+      onDragOver={e => { e.preventDefault(); setOver(true); }}
+      onDragLeave={() => setOver(false)}
+      onDrop={handleDrop}
+      style={{
+        border: `2px dashed ${over ? "#1565c0" : "#90caf9"}`,
+        borderRadius: 10, padding: "20px", textAlign: "center", cursor: "pointer",
+        background: over ? "#e3f2fd" : "#f5f9ff", transition: "all .15s",
+      }}
+    >
+      <input ref={inputRef} type="file" accept=".xls,.xlsx" style={{ display: "none" }} onChange={onChange} />
+      <div style={{ fontSize: 28 }}>{icon}</div>
+      <div style={{ fontSize: 13, color: "#555", marginTop: 6 }}>{label}</div>
+      <div style={{ fontSize: 12, color: "#1565c0", fontWeight: 700, marginTop: 4 }}>{name || "파일 없음"}</div>
     </div>
   );
 }
