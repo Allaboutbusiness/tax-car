@@ -210,12 +210,11 @@ export default function CarLog() {
       ["No", "날짜", "출발시각", "출발지", "도착시각", "도착지", "주행거리(km)", "업무목적", "비고"],
     ];
     let prevMonth = "";
-    let monthStart = 5, monthTotal = 0, monthCount = 0, rowIdx = 5;
+    let monthTotal = 0, monthCount = 0;
     yearTrips.forEach((t, i) => {
       const m = t.started_at?.slice(0, 7) || "";
       if (prevMonth && m !== prevMonth) {
         rows.push([`${prevMonth} 소계`, "", "", "", "", "", Math.round(monthTotal * 100) / 100, `${monthCount}회`, ""]);
-        rowIdx++;
         monthTotal = 0; monthCount = 0;
       }
       rows.push([
@@ -232,7 +231,6 @@ export default function CarLog() {
       monthTotal += t.distance || 0;
       monthCount++;
       prevMonth = m;
-      rowIdx++;
     });
     if (prevMonth) {
       rows.push([`${prevMonth} 소계`, "", "", "", "", "", Math.round(monthTotal * 100) / 100, `${monthCount}회`, ""]);
