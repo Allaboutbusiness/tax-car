@@ -322,7 +322,7 @@ export default function TaxPage() {
   const [invoiceSalesNames, setInvoiceSalesNames] = useState([]);
   const [invoicePurchaseNames, setInvoicePurchaseNames] = useState([]);
   const [cashNames, setCashNames] = useState([]);
-  const [hometaxName, setHometaxName] = useState(""); // 홈택스 검증은 단일 파일
+  const [hometaxNames, setHometaxNames] = useState([]);
   const [mergeFileNames, setMergeFileNames] = useState([]);
   const [mergeStatus, setMergeStatus] = useState("");
   const [mergeLoading, setMergeLoading] = useState(false);
@@ -413,11 +413,26 @@ export default function TaxPage() {
   }
 
   async function analyzeHometax() {
-    const file = hometaxRef.current?.files[0];
-    if (!file) return;
+    const files = Array.from(hometaxRef.current?.files || []);
+    if (!files.length) return;
     setHometaxLoading(true);
     try {
-      const items = await parseHometax(file);
+      const items = [];
+      for (const file of files) {
+        if (/\.pdf$/i.test(file.name)) {
+          // PDF → Anthropic API로 파싱
+          const fd = new FormData();
+          fd.append("file", file);
+          const res = await fetch("/api/parse-pdf", { method: "POST", body: fd });
+          const data = await res.json();
+          if (data.error) throw new Error(`${file.name}: ${data.error}`);
+          items.push({ payer: data.payer, gross: data.gross, tax: data.totalTax, net: data.net });
+        } else {
+          // Excel → 기존 파서
+          const parsed = await parseHometax(file);
+          items.push(...parsed);
+        }
+      }
       const current = loadData(year);
       setHometaxResult(crossCheck(items, current));
     } catch (e) { alert("파싱 오류: " + e.message); }
@@ -709,10 +724,11 @@ export default function TaxPage() {
           <div style={ss.card}>
             <h3 style={{ color: "#1565c0", marginBottom: 6, fontSize: 15 }}>🏛 홈택스 지급명세서 업로드</h3>
             <p style={{ fontSize: 13, color: "#666", marginBottom: 14, lineHeight: 1.6 }}>
-              홈택스 → 조회/발급 → 지급명세서 → <strong>사업소득 지급명세서</strong> Excel 다운로드 후 업로드
+              지급처별 <strong>PDF 지급명세서</strong>를 여러 개 한 번에 올리세요. (Excel도 가능)<br />
+              홈택스 → 조회/발급 → 지급명세서 → 사업소득 지급명세서 → 인쇄/저장(PDF)
             </p>
-            <DropZone icon="🏛" label="홈택스 지급명세서 Excel" name={hometaxName} inputRef={hometaxRef}
-              onChange={e => { setHometaxName(e.target.files[0]?.name || ""); setHometaxResult(null); }} />
+            <DropZone icon="🏛" label="지급명세서 PDF 또는 Excel (복수 선택 가능)" names={hometaxNames} inputRef={hometaxRef}
+              onChange={e => { setHometaxNames(Array.from(e.target.files).map(f => f.name)); setHometaxResult(null); }} />
             <button style={{ ...ss.btn(hometaxLoading ? "#aaa" : "#1565c0", hometaxLoading), marginTop: 12, width: "100%" }}
               disabled={hometaxLoading} onClick={analyzeHometax}>
               {hometaxLoading ? "⏳ 분석 중..." : "🔍 크로스체크 시작"}
