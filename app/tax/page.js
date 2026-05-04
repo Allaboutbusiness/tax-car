@@ -313,7 +313,7 @@ export default function TaxPage() {
 
   const bankRef = useRef(); const cardRef = useRef(); const bizCardRef = useRef();
   const invoiceSalesRef = useRef(); const invoicePurchaseRef = useRef();
-  const cashRef = useRef();
+  const cashRef = useRef(); const bizCashRef = useRef();
   const hometaxRef = useRef(); const mergeRef = useRef();
 
   const [bankNames, setBankNames] = useState([]);
@@ -322,6 +322,7 @@ export default function TaxPage() {
   const [invoiceSalesNames, setInvoiceSalesNames] = useState([]);
   const [invoicePurchaseNames, setInvoicePurchaseNames] = useState([]);
   const [cashNames, setCashNames] = useState([]);
+  const [bizCashNames, setBizCashNames] = useState([]);
   const [hometaxNames, setHometaxNames] = useState([]);
   const [mergeFileNames, setMergeFileNames] = useState([]);
   const [mergeStatus, setMergeStatus] = useState("");
@@ -364,7 +365,8 @@ export default function TaxPage() {
     const invoiceSalesFiles = Array.from(invoiceSalesRef.current?.files || []);
     const invoicePurchaseFiles = Array.from(invoicePurchaseRef.current?.files || []);
     const cashFiles = Array.from(cashRef.current?.files || []);
-    const allFiles = [...bankFiles, ...cardFiles, ...bizCardFiles, ...invoiceSalesFiles, ...invoicePurchaseFiles, ...cashFiles];
+    const bizCashFiles = Array.from(bizCashRef.current?.files || []);
+    const allFiles = [...bankFiles, ...cardFiles, ...bizCardFiles, ...invoiceSalesFiles, ...invoicePurchaseFiles, ...cashFiles, ...bizCashFiles];
     if (!allFiles.length) { setStatus("파일을 하나 이상 선택해주세요."); return; }
 
     saveConfig({ car_business_ratio: carRatio });
@@ -377,6 +379,7 @@ export default function TaxPage() {
       for (const f of invoiceSalesFiles) if (isExcel(f)) preCategorized.push(...(await parseTaxInvoice(f, "sales")));
       for (const f of invoicePurchaseFiles) if (isExcel(f)) preCategorized.push(...(await parseTaxInvoice(f, "purchase")));
       for (const f of cashFiles) if (isExcel(f)) newTxs.push(...(await parseCashReceipt(f)));
+      for (const f of bizCashFiles) if (isExcel(f)) newTxs.push(...(await parseCashReceipt(f)));
 
       setProgress(40); setStatus(`${newTxs.length + preCategorized.length}건 파싱 완료. 규칙 적용 중...`);
 
@@ -591,6 +594,9 @@ export default function TaxPage() {
               <DropZone icon="🏦" label="국민은행 통장 XLS" names={bankNames} inputRef={bankRef} onChange={e => setBankNames(Array.from(e.target.files).map(f => f.name))} />
               <DropZone icon="💳" label="FC 신한카드 XLS" names={cardNames} inputRef={cardRef} onChange={e => setCardNames(Array.from(e.target.files).map(f => f.name))} />
             </div>
+            <div style={{ marginTop: 12 }}>
+              <DropZone icon="🧾" label="현금영수증 사용내역 (FC)" names={cashNames} inputRef={cashRef} onChange={e => setCashNames(Array.from(e.target.files).map(f => f.name))} color="#6a1b9a" note="홈택스→조회/발급→현금영수증→사용내역 Excel" />
+            </div>
           </div>
 
           <div style={ss.card}>
@@ -600,11 +606,9 @@ export default function TaxPage() {
               <DropZone icon="📤" label="세금계산서(내가 발급)" names={invoiceSalesNames} inputRef={invoiceSalesRef} onChange={e => setInvoiceSalesNames(Array.from(e.target.files).map(f => f.name))} color="#2e7d32" note="홈택스→매출세금계산서 Excel" />
               <DropZone icon="📥" label="세금계산서(발급받은것)" names={invoicePurchaseNames} inputRef={invoicePurchaseRef} onChange={e => setInvoicePurchaseNames(Array.from(e.target.files).map(f => f.name))} color="#2e7d32" note="홈택스→매입세금계산서 Excel" />
             </div>
-          </div>
-
-          <div style={ss.card}>
-            <h3 style={{ color: "#6a1b9a", marginBottom: 14, fontSize: 15 }}>🧾 현금영수증</h3>
-            <DropZone icon="🧾" label="현금영수증 사용내역 (프리랜서·사업자 공통)" names={cashNames} inputRef={cashRef} onChange={e => setCashNames(Array.from(e.target.files).map(f => f.name))} color="#6a1b9a" note="홈택스→조회/발급→현금영수증→사용내역 조회 → Excel 저장" />
+            <div style={{ marginTop: 12 }}>
+              <DropZone icon="🧾" label="현금영수증 사용내역 (사업자)" names={bizCashNames} inputRef={bizCashRef} onChange={e => setBizCashNames(Array.from(e.target.files).map(f => f.name))} color="#6a1b9a" note="홈택스→조회/발급→현금영수증→사용내역 Excel" />
+            </div>
           </div>
 
           <div style={ss.card}>
