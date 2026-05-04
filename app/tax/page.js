@@ -127,6 +127,58 @@ async function parseTaxInvoice(file, direction) {
   return results;
 }
 
+// 홈택스 현금영수증 사용내역 Excel 파싱
+async function parseCashReceipt(file) {
+  const { read, utils } = await import("xlsx");
+  const buf = await file.arrayBuffer();
+  const wb = read(buf, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" });
+  const results = [];
+
+  // 헤더 행 탐색: '거래일', '승인일', '가맹점', '상호' 등 포함 행
+  let hIdx = -1;
+  for (let i = 0; i < Math.min(15, rows.length); i++) {
+    const row = rows[i].map(c => String(c).trim());
+    if (row.some(c => c.includes("거래일") || c.includes("승인일") || c.includes("가맹점") || c.includes("상호명"))) {
+      hIdx = i; break;
+    }
+  }
+  if (hIdx < 0) return results;
+
+  const headers = rows[hIdx].map(c => String(c).trim());
+  const dateIdx = headers.findIndex(h => h.includes("거래일") || h.includes("승인일") || h.includes("일자"));
+  const nameIdx = headers.findIndex(h => h.includes("가맹점") || h.includes("상호"));
+  const supplyIdx = headers.findIndex(h => h.includes("공급가액"));
+  const totalIdx = headers.findIndex(h => h.includes("합계") || (h.includes("금액") && !h.includes("공급") && !h.includes("부가") && !h.includes("세")));
+  const typeIdx = headers.findIndex(h => h.includes("구분") || h.includes("사용구분"));
+
+  for (let i = hIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    const dateRaw = String(row[dateIdx >= 0 ? dateIdx : 0] || "").replace(/\./g, "-").slice(0, 10);
+    if (!dateRaw || dateRaw.length < 10) continue;
+    const name = nameIdx >= 0 ? String(row[nameIdx] || "").trim() : "현금영수증";
+    if (!name) continue;
+    const supplyAmt = supplyIdx >= 0 ? parseInt(String(row[supplyIdx] || "0").replace(/,/g, "")) || 0 : 0;
+    const totalAmt = totalIdx >= 0 ? parseInt(String(row[totalIdx] || "0").replace(/,/g, "")) || 0 : 0;
+    const amount = totalAmt || supplyAmt;
+    if (amount <= 0) continue;
+    // 구분 필드 확인 (소비자지출/사업자지출 → 매입)
+    const typeStr = typeIdx >= 0 ? String(row[typeIdx] || "").trim() : "";
+    const isIncome = typeStr.includes("수입") || typeStr.includes("판매");
+    results.push({
+      id: `cash_${i}_${Date.now()}`,
+      date: dateRaw,
+      merchant: name,
+      amount,
+      out: isIncome ? 0 : amount,
+      in: isIncome ? amount : 0,
+      source: "cash",
+    });
+  }
+  return results;
+}
+
 async function categorizeWithAI(unmatched) {
   if (!unmatched.length) return [];
   try {
@@ -164,7 +216,7 @@ async function exportExcel(txs, carRatio, year) {
     const ratio = t.category === "차량유지비" ? carRatio : 100;
     const approved = Math.round(amt * ratio / 100);
     totalApproved += approved;
-    const srcLabel = { card: "FC카드", biz_card: "사업자카드", bank: "통장", invoice_purchase: "세금계산서" }[t.source] || t.source;
+    const srcLabel = { card: "FC카드", biz_card: "사업자카드", bank: "통장", invoice_purchase: "세금계산서", cash: "현금영수증" }[t.source] || t.source;
     expRows.push([t.date, t.merchant || t.memo || "", t.category, amt, `${ratio}%`, approved, srcLabel]);
   });
   expRows.push(["합계", "", "", "", "", totalApproved, ""]);
@@ -261,14 +313,16 @@ export default function TaxPage() {
 
   const bankRef = useRef(); const cardRef = useRef(); const bizCardRef = useRef();
   const invoiceSalesRef = useRef(); const invoicePurchaseRef = useRef();
+  const cashRef = useRef();
   const hometaxRef = useRef(); const mergeRef = useRef();
 
-  const [bankName, setBankName] = useState("");
-  const [cardName, setCardName] = useState("");
-  const [bizCardName, setBizCardName] = useState("");
-  const [invoiceSalesName, setInvoiceSalesName] = useState("");
-  const [invoicePurchaseName, setInvoicePurchaseName] = useState("");
-  const [hometaxName, setHometaxName] = useState("");
+  const [bankNames, setBankNames] = useState([]);
+  const [cardNames, setCardNames] = useState([]);
+  const [bizCardNames, setBizCardNames] = useState([]);
+  const [invoiceSalesNames, setInvoiceSalesNames] = useState([]);
+  const [invoicePurchaseNames, setInvoicePurchaseNames] = useState([]);
+  const [cashNames, setCashNames] = useState([]);
+  const [hometaxName, setHometaxName] = useState(""); // 홈택스 검증은 단일 파일
   const [mergeFileNames, setMergeFileNames] = useState([]);
   const [mergeStatus, setMergeStatus] = useState("");
   const [mergeLoading, setMergeLoading] = useState(false);
@@ -303,22 +357,26 @@ export default function TaxPage() {
   const hasAnyColFilter = Object.values(colFilters).some(v => v.length > 0) || nameFilter !== "";
 
   async function analyze() {
-    const bankFile = bankRef.current?.files[0];
-    const cardFile = cardRef.current?.files[0];
-    const bizCardFile = bizCardRef.current?.files[0];
-    const invoiceSalesFile = invoiceSalesRef.current?.files[0];
-    const invoicePurchaseFile = invoicePurchaseRef.current?.files[0];
-    if (!bankFile && !cardFile && !bizCardFile && !invoiceSalesFile && !invoicePurchaseFile) { setStatus("파일을 하나 이상 선택해주세요."); return; }
+    const isExcel = (f) => /\.(xls|xlsx)$/i.test(f.name);
+    const bankFiles = Array.from(bankRef.current?.files || []);
+    const cardFiles = Array.from(cardRef.current?.files || []);
+    const bizCardFiles = Array.from(bizCardRef.current?.files || []);
+    const invoiceSalesFiles = Array.from(invoiceSalesRef.current?.files || []);
+    const invoicePurchaseFiles = Array.from(invoicePurchaseRef.current?.files || []);
+    const cashFiles = Array.from(cashRef.current?.files || []);
+    const allFiles = [...bankFiles, ...cardFiles, ...bizCardFiles, ...invoiceSalesFiles, ...invoicePurchaseFiles, ...cashFiles];
+    if (!allFiles.length) { setStatus("파일을 하나 이상 선택해주세요."); return; }
 
     saveConfig({ car_business_ratio: carRatio });
     setLoading(true); setProgress(10); setStatus("파일 파싱 중...");
     try {
       let newTxs = [], preCategorized = [];
-      if (bankFile) newTxs.push(...(await parseKBBank(bankFile)));
-      if (cardFile) newTxs.push(...(await parseShinhanCard(cardFile, "card")));
-      if (bizCardFile) newTxs.push(...(await parseShinhanCard(bizCardFile, "biz_card")));
-      if (invoiceSalesFile) preCategorized.push(...(await parseTaxInvoice(invoiceSalesFile, "sales")));
-      if (invoicePurchaseFile) preCategorized.push(...(await parseTaxInvoice(invoicePurchaseFile, "purchase")));
+      for (const f of bankFiles) if (isExcel(f)) newTxs.push(...(await parseKBBank(f)));
+      for (const f of cardFiles) if (isExcel(f)) newTxs.push(...(await parseShinhanCard(f, "card")));
+      for (const f of bizCardFiles) if (isExcel(f)) newTxs.push(...(await parseShinhanCard(f, "biz_card")));
+      for (const f of invoiceSalesFiles) if (isExcel(f)) preCategorized.push(...(await parseTaxInvoice(f, "sales")));
+      for (const f of invoicePurchaseFiles) if (isExcel(f)) preCategorized.push(...(await parseTaxInvoice(f, "purchase")));
+      for (const f of cashFiles) if (isExcel(f)) newTxs.push(...(await parseCashReceipt(f)));
 
       setProgress(40); setStatus(`${newTxs.length + preCategorized.length}건 파싱 완료. 규칙 적용 중...`);
 
@@ -449,7 +507,7 @@ export default function TaxPage() {
   const displayedTxs = filtered.filter(t => {
     const name = t.merchant || t.memo || "";
     const month = t.date?.slice(0, 7) || "";
-    const srcLabel = (t.source === "card" || t.source === "biz_card") ? "카드" : t.source === "invoice_sales" || t.source === "invoice_purchase" ? "세금계산서" : "통장";
+    const srcLabel = (t.source === "card" || t.source === "biz_card") ? "카드" : (t.source === "invoice_sales" || t.source === "invoice_purchase") ? "세금계산서" : t.source === "cash" ? "현금영수증" : "통장";
     const typeLabel = t.type === "income" ? "매출" : t.type === "exclude" ? "제외" : "매입";
     const mLabel = METHOD_LABEL[t.method] || "미분류";
     if (colFilters.date.length > 0 && !colFilters.date.includes(month)) return false;
@@ -509,23 +567,26 @@ export default function TaxPage() {
         <div style={ss.panel}>
           <div style={{ background: "#e3f2fd", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#1565c0", lineHeight: 1.8 }}>
             💡 <strong>{year}년 데이터 업로드</strong> — 분기별·월별로 나눠 올려도 자동 누적·중복 제거됩니다.<br />
-            🏦 FC 통장 + 💳 FC 카드 + 🏢 사업자 카드 + 📜 세금계산서를 각각 업로드하세요.
+            📎 각 슬롯에 <strong>여러 파일을 한 번에</strong> 선택할 수 있습니다 (Excel .xls/.xlsx, PDF 지원).
           </div>
 
           <div style={ss.card}>
             <h3 style={{ color: "#1565c0", marginBottom: 14, fontSize: 15 }}>📁 FC(프리랜서) 소득 파일</h3>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <DropZone icon="🏦" label="국민은행 통장 XLS" name={bankName} inputRef={bankRef} onChange={e => setBankName(e.target.files[0]?.name || "")} />
-              <DropZone icon="💳" label="FC 신한카드 XLS" name={cardName} inputRef={cardRef} onChange={e => setCardName(e.target.files[0]?.name || "")} />
+              <DropZone icon="🏦" label="국민은행 통장 XLS" names={bankNames} inputRef={bankRef} onChange={e => setBankNames(Array.from(e.target.files).map(f => f.name))} />
+              <DropZone icon="💳" label="FC 신한카드 XLS" names={cardNames} inputRef={cardRef} onChange={e => setCardNames(Array.from(e.target.files).map(f => f.name))} />
             </div>
           </div>
 
           <div style={ss.card}>
             <h3 style={{ color: "#2e7d32", marginBottom: 14, fontSize: 15 }}>🏢 개인사업자 파일</h3>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-              <DropZone icon="💳" label="사업자 전용카드 XLS" name={bizCardName} inputRef={bizCardRef} onChange={e => setBizCardName(e.target.files[0]?.name || "")} color="#2e7d32" />
-              <DropZone icon="📤" label="세금계산서(내가 발급)" name={invoiceSalesName} inputRef={invoiceSalesRef} onChange={e => setInvoiceSalesName(e.target.files[0]?.name || "")} color="#2e7d32" note="홈택스→매출세금계산서 Excel" />
-              <DropZone icon="📥" label="세금계산서(발급받은것)" name={invoicePurchaseName} inputRef={invoicePurchaseRef} onChange={e => setInvoicePurchaseName(e.target.files[0]?.name || "")} color="#2e7d32" note="홈택스→매입세금계산서 Excel" />
+              <DropZone icon="💳" label="사업자 전용카드 XLS" names={bizCardNames} inputRef={bizCardRef} onChange={e => setBizCardNames(Array.from(e.target.files).map(f => f.name))} color="#2e7d32" />
+              <DropZone icon="📤" label="세금계산서(내가 발급)" names={invoiceSalesNames} inputRef={invoiceSalesRef} onChange={e => setInvoiceSalesNames(Array.from(e.target.files).map(f => f.name))} color="#2e7d32" note="홈택스→매출세금계산서 Excel" />
+              <DropZone icon="📥" label="세금계산서(발급받은것)" names={invoicePurchaseNames} inputRef={invoicePurchaseRef} onChange={e => setInvoicePurchaseNames(Array.from(e.target.files).map(f => f.name))} color="#2e7d32" note="홈택스→매입세금계산서 Excel" />
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <DropZone icon="🧾" label="현금영수증 사용내역" names={cashNames} inputRef={cashRef} onChange={e => setCashNames(Array.from(e.target.files).map(f => f.name))} color="#6a1b9a" note="홈택스→조회/발급→현금영수증→사용내역 Excel" />
             </div>
           </div>
 
@@ -599,7 +660,7 @@ export default function TaxPage() {
                   </th>
                   <th style={{ color: "#fff", padding: "9px 10px", textAlign: "left", whiteSpace: "nowrap" }}>금액</th>
                   <th style={{ color: "#fff", padding: "9px 10px", textAlign: "left", position: "relative" }}>
-                    <ColFilterDropdown label="출처" fKey="source" options={["카드", "통장", "세금계산서"]} selected={colFilters.source}
+                    <ColFilterDropdown label="출처" fKey="source" options={["카드", "통장", "세금계산서", "현금영수증"]} selected={colFilters.source}
                       onToggle={(v) => toggleColFilter("source", v)} onClear={() => clearColFilter("source")}
                       isOpen={openFilter === "source"} onOpen={(k) => setOpenFilter(openFilter === k ? "" : k)} />
                   </th>
@@ -811,25 +872,28 @@ function ColFilterDropdown({ label, fKey, options, selected, onToggle, onClear, 
 }
 
 // ── 드롭존 ────────────────────────────────────────────────
-function DropZone({ icon, label, name, inputRef, onChange, color = "#1565c0", note }) {
+function DropZone({ icon, label, names = [], inputRef, onChange, color = "#1565c0", note }) {
   const [over, setOver] = useState(false);
   function handleDrop(e) {
     e.preventDefault(); setOver(false);
-    const file = e.dataTransfer.files[0];
-    if (!file) return;
-    const dt = new DataTransfer(); dt.items.add(file);
+    const files = e.dataTransfer.files;
+    if (!files || !files.length) return;
+    const dt = new DataTransfer();
+    Array.from(files).forEach(f => dt.items.add(f));
     inputRef.current.files = dt.files;
     onChange({ target: { files: dt.files } });
   }
+  const hasFiles = names.length > 0;
+  const displayName = !hasFiles ? "파일 없음" : names.length === 1 ? names[0] : `${names.length}개 파일 선택됨`;
   return (
     <div onClick={() => inputRef.current?.click()} onDragOver={e => { e.preventDefault(); setOver(true); }}
       onDragLeave={() => setOver(false)} onDrop={handleDrop}
       style={{ border: `2px dashed ${over ? color : "#90caf9"}`, borderRadius: 10, padding: "16px", textAlign: "center", cursor: "pointer", background: over ? "#e3f2fd" : "#f5f9ff", transition: "all .15s" }}>
-      <input ref={inputRef} type="file" accept=".xls,.xlsx" style={{ display: "none" }} onChange={onChange} />
+      <input ref={inputRef} type="file" accept=".xls,.xlsx,.pdf" multiple style={{ display: "none" }} onChange={onChange} />
       <div style={{ fontSize: 26 }}>{icon}</div>
       <div style={{ fontSize: 12, color: "#555", marginTop: 4 }}>{label}</div>
       {note && <div style={{ fontSize: 10, color: "#999", marginTop: 2 }}>{note}</div>}
-      <div style={{ fontSize: 11, color: name ? color : "#aaa", fontWeight: 700, marginTop: 4 }}>{name || "파일 없음"}</div>
+      <div style={{ fontSize: 11, color: hasFiles ? color : "#aaa", fontWeight: 700, marginTop: 4 }}>{displayName}</div>
     </div>
   );
 }
@@ -844,7 +908,7 @@ function TxRow({ tx, amt, name, isUncl, onSave, methodLabel }) {
   const mLabel = methodLabel[tx.method] || "미분류";
   const mBg = { 자동분류: "#e3f2fd", AI판단: "#fff3e0", 직접수정: "#f3e5f5" }[mLabel] || "#ffebee";
   const mColor = { 자동분류: "#1565c0", AI판단: "#e65100", 직접수정: "#6a1b9a" }[mLabel] || "#c62828";
-  const srcLabel = { card: "FC카드", biz_card: "사업자카드", bank: "통장", invoice_sales: "계산서(매)", invoice_purchase: "계산서(매)" }[tx.source] || tx.source;
+  const srcLabel = { card: "FC카드", biz_card: "사업자카드", bank: "통장", invoice_sales: "계산서(매)", invoice_purchase: "계산서(매)", cash: "현금영수증" }[tx.source] || tx.source;
 
   return (
     <tr style={{ background: isUncl ? "#fff8e1" : "transparent", borderLeft: `3px solid ${borderColor}` }}>
