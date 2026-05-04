@@ -600,9 +600,11 @@ export default function TaxPage() {
               <DropZone icon="📤" label="세금계산서(내가 발급)" names={invoiceSalesNames} inputRef={invoiceSalesRef} onChange={e => setInvoiceSalesNames(Array.from(e.target.files).map(f => f.name))} color="#2e7d32" note="홈택스→매출세금계산서 Excel" />
               <DropZone icon="📥" label="세금계산서(발급받은것)" names={invoicePurchaseNames} inputRef={invoicePurchaseRef} onChange={e => setInvoicePurchaseNames(Array.from(e.target.files).map(f => f.name))} color="#2e7d32" note="홈택스→매입세금계산서 Excel" />
             </div>
-            <div style={{ marginTop: 12 }}>
-              <DropZone icon="🧾" label="현금영수증 사용내역" names={cashNames} inputRef={cashRef} onChange={e => setCashNames(Array.from(e.target.files).map(f => f.name))} color="#6a1b9a" note="홈택스→조회/발급→현금영수증→사용내역 Excel" />
-            </div>
+          </div>
+
+          <div style={ss.card}>
+            <h3 style={{ color: "#6a1b9a", marginBottom: 14, fontSize: 15 }}>🧾 현금영수증</h3>
+            <DropZone icon="🧾" label="현금영수증 사용내역 (프리랜서·사업자 공통)" names={cashNames} inputRef={cashRef} onChange={e => setCashNames(Array.from(e.target.files).map(f => f.name))} color="#6a1b9a" note="홈택스→조회/발급→현금영수증→사용내역 조회 → Excel 저장" />
           </div>
 
           <div style={ss.card}>
